@@ -81,8 +81,15 @@ Two private templates exist in the Runpod account:
 | `TS_HOSTNAME` | `runpod-tf` | `runpod-comfy` |
 | Container disk | 30 GB | 150 GB (the base's default) |
 | Volume at `/workspace` | 20 GB | 50 GB (as the official template) |
-| CUDA | any | 12.8, 12.9 (the base's CUDA line; no Blackwell) |
+| Host CUDA | any | 12.8 – 13.4 (the base needs 12.8+; a newer driver runs it) |
 | GPU | any NVIDIA | 16 GB+ VRAM |
+
+`allowedCudaVersions` is matched **exactly** against the host's reported CUDA version,
+not as a minimum. The official ComfyUI template's `12.8, 12.9` matches almost no
+host once the fleet moves to newer drivers (most were on 13.2 in October 2026), and the
+deploy page then offers no GPU at all. Keep the list open upwards. The `comfyui` base is
+the CUDA 12.8 line: prefer pre-Blackwell GPUs (RTX 4090, L40S, A6000) until a Blackwell
+card has been tried on it, or move the base to Runpod's `cuda13.0` variant.
 
 Common to both:
 
