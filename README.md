@@ -65,32 +65,45 @@ logged to `/var/log/tailscaled.log` and never blocks or restarts the pod. Withou
    referenced from the template as `{{ RUNPOD_SECRET_ts_authkey }}`, so it never
    appears in the template or in this repo.
 
-4. **Package visibility.** The first CI run creates the GHCR packages. Check that
-   both are public (*GitHub → Packages → package settings*), otherwise Runpod needs
-   registry credentials to pull them.
+4. **Package visibility.** The GHCR packages inherit the repository's public
+   visibility, so Runpod pulls them without registry credentials. If the repository
+   ever goes private, either make the packages public or add a registry credential to
+   the templates.
 
 ## Runpod templates
 
-Common to both:
+Two private templates exist in the Runpod account:
 
-- **Environment:** `TS_AUTHKEY={{ RUNPOD_SECRET_ts_authkey }}`, `TS_HOSTNAME=<name>`,
-  `JUPYTER_PASSWORD=<token>` (JupyterLab does not start without it).
-- **Docker command:** leave empty. It replaces the image `CMD` (`/start.sh`), and the
-  pod would boot without SSH, JupyterLab or ComfyUI.
-- **Volume:** a network volume mounted at `/workspace`. Only `/workspace` survives a
-  stop/start, and the Tailscale state lives there too.
-- **Ports:** none are needed with Tailscale. Keep `8888/http` (tf) or `8188/http`
-  (comfyui) while testing, as a way in if Tailscale does not come up; the Runpod web
-  terminal is the other one. Proxy URLs are public and unauthenticated, so ComfyUI,
-  which has no login of its own, should not stay exposed.
-
-Per image:
-
-| | `tf` | `comfyui` |
+| | `runpods-tf` | `runpods-comfyui` |
 | --- | --- | --- |
+| Template id | `na5e98qdbb` | `bx72oa97x7` |
+| Image | `ghcr.io/jakub-k-slys/runpods/tf:sha-02aad72` | `ghcr.io/jakub-k-slys/runpods/comfyui:sha-02aad72` |
 | `TS_HOSTNAME` | `runpod-tf` | `runpod-comfy` |
 | Container disk | 30 GB | 150 GB (the base's default) |
+| Volume at `/workspace` | 20 GB | 50 GB (as the official template) |
+| CUDA | any | 12.8, 12.9 (the base's CUDA line; no Blackwell) |
 | GPU | any NVIDIA | 16 GB+ VRAM |
+
+Common to both:
+
+- **Image tag:** pinned to a commit (`sha-<commit>`), not `latest`, so a pod gets a
+  known build and hosts never serve a stale cached `latest`. After a CI build worth
+  shipping, point the template at the new tag (*Templates → Edit*, or the Runpod MCP
+  `update-template`).
+- **Environment:** `TS_AUTHKEY={{ RUNPOD_SECRET_ts_authkey }}` and `TS_HOSTNAME`.
+  `startJupyter` and `startSsh` are on, so Runpod injects a generated
+  `JUPYTER_PASSWORD` (shown on the pod's *Connect* page) and the account's SSH keys as
+  `PUBLIC_KEY`.
+- **Docker command:** empty. It replaces the image `CMD` (`/start.sh`), and the pod
+  would boot without SSH, JupyterLab or ComfyUI.
+- **Volume:** the template's volume disk is host-local. For data that must outlive the
+  host, pick a network volume at deploy time; it mounts at `/workspace` in its place.
+  Only `/workspace` survives a stop/start, and the Tailscale state lives there too.
+- **Ports:** only `8888/http` (JupyterLab, token-protected) and `22/tcp` (SSH, key
+  only), as a way in if Tailscale does not come up. ComfyUI (`8188`, no login) and
+  FileBrowser (`8080`, default `admin` / `adminadmin12` unless `FILEBROWSER_PASSWORD` is
+  set) are deliberately not exposed: Runpod proxy URLs are public. Reach them over the
+  tailnet.
 
 ## Connecting
 
