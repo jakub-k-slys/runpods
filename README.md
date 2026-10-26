@@ -1,0 +1,139 @@
+# runpods
+
+Custom Runpod pod images that join a Tailscale tailnet on boot, so the pod is
+reachable by a stable tailnet name and nothing has to be exposed publicly.
+
+| Image | Base | Adds |
+| --- | --- | --- |
+| `ghcr.io/jakub-k-slys/runpods/tf` | `runpod/base` (Ubuntu 24.04, SSH, JupyterLab) | TensorFlow in `/opt/tf` with a `TensorFlow` Jupyter kernel, Tailscale |
+| `ghcr.io/jakub-k-slys/runpods/comfyui` | `runpod/comfyui` (CUDA 12.8) | Tailscale |
+
+Versions are pinned in [`docker-bake.hcl`](docker-bake.hcl). CI builds both images on
+every push to `main` and publishes `:latest` and `:sha-<commit>`.
+
+## How Tailscale runs in a pod
+
+Runpod pods are unprivileged containers, without `/dev/net/tun` or `NET_ADMIN`, so
+`tailscaled` runs in **userspace networking** mode:
+
+- **Inbound works as usual.** Tailnet connections to the pod are forwarded to its
+  local ports: SSH, JupyterLab, ComfyUI.
+- **Outbound to the tailnet is proxy-only.** From inside the pod, tailnet hosts are
+  reachable through the SOCKS5/HTTP proxy on `localhost:1055`
+  (`ALL_PROXY=socks5://localhost:1055`), not transparently.
+- **It may relay.** Runpod has no UDP on pod ports. When no direct path forms, traffic
+  goes through Tailscale's DERP relays over HTTPS. That works, but with more latency;
+  `tailscale ping <pod>` shows `via DERP` or `via <ip>`.
+
+[`common/tailscale/ts-entrypoint.sh`](common/tailscale/ts-entrypoint.sh) starts it in
+the background and then `exec`s the image's own `/start.sh`. A Tailscale failure is
+logged to `/var/log/tailscaled.log` and never blocks or restarts the pod. Without
+`TS_AUTHKEY`, the image behaves exactly like its base.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TS_AUTHKEY` | unset | Auth key. Unset = no Tailscale. |
+| `TS_HOSTNAME` | `runpod-<pod id>` | Name on the tailnet. |
+| `TS_STATE_DIR` | `/workspace/.tailscale/<hostname>` | Node state, so the pod keeps its identity and name across stop/start. `mem` keeps it in memory (use with an ephemeral key). |
+| `TS_EXTRA_ARGS` | unset | Extra flags for `tailscale up`. |
+
+## One-time setup
+
+1. **Tailnet policy.** Add the tag and a one-way grant: you reach the pods, the pods
+   reach nothing. A rented GPU box should have no path into the rest of the tailnet.
+   If the policy still has a default allow-all rule, narrow it first.
+
+   ```jsonc
+   "tagOwners": {
+     "tag:runpod": ["autogroup:admin"],
+   },
+   "grants": [
+     {
+       "src": ["autogroup:member"],
+       "dst": ["tag:runpod"],
+       "ip":  ["tcp:22", "tcp:8888", "tcp:8188", "tcp:8080"],
+     },
+   ],
+   ```
+
+2. **Auth key.** In the Tailscale admin console: *Settings → Keys → Generate auth key*,
+   **reusable**, **pre-approved**, tag `tag:runpod`. Leave it non-ephemeral when using the
+   default persistent state. Auth keys expire after at most 90 days; nodes already joined
+   keep working, because tagged nodes have key expiry disabled.
+
+3. **Runpod secret.** Store the key as a Runpod secret named `ts_authkey`. It is
+   referenced from the template as `{{ RUNPOD_SECRET_ts_authkey }}`, so it never
+   appears in the template or in this repo.
+
+4. **Package visibility.** The first CI run creates the GHCR packages. Check that
+   both are public (*GitHub → Packages → package settings*), otherwise Runpod needs
+   registry credentials to pull them.
+
+## Runpod templates
+
+Common to both:
+
+- **Environment:** `TS_AUTHKEY={{ RUNPOD_SECRET_ts_authkey }}`, `TS_HOSTNAME=<name>`,
+  `JUPYTER_PASSWORD=<token>` (JupyterLab does not start without it).
+- **Docker command:** leave empty. It replaces the image `CMD` (`/start.sh`), and the
+  pod would boot without SSH, JupyterLab or ComfyUI.
+- **Volume:** a network volume mounted at `/workspace`. Only `/workspace` survives a
+  stop/start, and the Tailscale state lives there too.
+- **Ports:** none are needed with Tailscale. Keep `8888/http` (tf) or `8188/http`
+  (comfyui) while testing, as a way in if Tailscale does not come up; the Runpod web
+  terminal is the other one. Proxy URLs are public and unauthenticated, so ComfyUI,
+  which has no login of its own, should not stay exposed.
+
+Per image:
+
+| | `tf` | `comfyui` |
+| --- | --- | --- |
+| `TS_HOSTNAME` | `runpod-tf` | `runpod-comfy` |
+| Container disk | 30 GB | 150 GB (the base's default) |
+| GPU | any NVIDIA | 16 GB+ VRAM |
+
+## Connecting
+
+With `TS_HOSTNAME=runpod-tf` / `runpod-comfy`:
+
+- **SSH:** `ssh root@runpod-tf`. The account's SSH keys reach the pod through `PUBLIC_KEY`,
+  as on any Runpod image.
+- **JupyterLab:** `http://runpod-tf:8888/?token=<JUPYTER_PASSWORD>`. In PyCharm: *Jupyter →
+  Add Jupyter Connection → Connect to Jupyter server using URL*, then pick the
+  `TensorFlow` kernel. For a remote interpreter, use *On SSH* with `/opt/tf/bin/python`.
+- **ComfyUI:** `http://runpod-comfy:8188`, FileBrowser at `:8080`.
+
+The pod keeps its tailnet name across stop/start, unlike Runpod's public TCP ports,
+which change on every restart.
+
+## Building locally
+
+```bash
+docker buildx bake --print            # resolved config
+docker buildx bake tf --load          # linux/amd64; slow under emulation on Apple Silicon
+TAGS=test docker buildx bake comfyui --push
+```
+
+To bump a version, edit `docker-bake.hcl`. For Tailscale, the checksum is at
+`https://pkgs.tailscale.com/stable/tailscale_<version>_amd64.tgz.sha256`.
+
+## Verifying a new image
+
+1. The pod log shows `[tailscale] joined the tailnet as <name>`.
+2. `tailscale ping <name>` answers; note whether it is direct or via DERP.
+3. SSH and the web UIs answer over the tailnet name.
+4. tf: `/opt/tf/bin/python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"`
+   lists the GPU.
+5. After a stop/start, the pod comes back under the same name, not `<name>-1`.
+
+## Gotchas
+
+- **One name per pod.** Two pods with the same `TS_HOSTNAME` on one network volume
+  share a state directory and fight over the node identity.
+- **Deleting a node in the admin console** invalidates the stored state. Remove
+  `/workspace/.tailscale/<hostname>` so the next boot registers again with the auth key.
+- **ComfyUI first boot** copies ComfyUI to `/workspace/runpod-slim` and takes a few
+  minutes; "Running" in the console does not mean the UI is up yet.
+- **Models belong on the volume, not in the image.** Download them on the pod
+  (ComfyUI-Manager, `huggingface-cli`). Uploading them over a DERP-relayed tailnet
+  connection is slow.
