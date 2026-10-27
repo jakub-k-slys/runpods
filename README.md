@@ -21,9 +21,11 @@ Runpod pods are unprivileged containers, without `/dev/net/tun` or `NET_ADMIN`, 
 - **Outbound to the tailnet is proxy-only.** From inside the pod, tailnet hosts are
   reachable through the SOCKS5/HTTP proxy on `localhost:1055`
   (`ALL_PROXY=socks5://localhost:1055`), not transparently.
-- **It may relay.** Runpod has no UDP on pod ports. When no direct path forms, traffic
-  goes through Tailscale's DERP relays over HTTPS. That works, but with more latency;
-  `tailscale ping <pod>` shows `via DERP` or `via <ip>`.
+- **It may relay.** Pod ports carry no UDP, so whether a direct path forms depends on the
+  host's NAT. When none does, traffic goes through Tailscale's DERP relays over HTTPS. That
+  works, but with more latency; `tailscale ping <pod>` shows `via DERP(<region>)` or
+  `via <ip>:<port>`. In the October 2026 tests both Secure Cloud pods went direct and the
+  Community Cloud pod relayed (see [Test results](#test-results-2026-10-27)).
 
 [`common/tailscale/ts-entrypoint.sh`](common/tailscale/ts-entrypoint.sh) starts it in
 the background and then `exec`s the image's own `/start.sh`. A Tailscale failure is
@@ -128,9 +130,17 @@ With `TS_HOSTNAME=runpod-tf` / `runpod-comfy`:
 
 - **SSH:** `ssh root@runpod-tf`. The account's SSH keys reach the pod through `PUBLIC_KEY`,
   as on any Runpod image.
-- **JupyterLab:** `http://runpod-tf:8888/?token=<JUPYTER_PASSWORD>`. In PyCharm: *Jupyter →
-  Add Jupyter Connection → Connect to Jupyter server using URL*, then pick the
-  `TensorFlow` kernel. For a remote interpreter, use *On SSH* with `/opt/tf/bin/python`.
+- **JupyterLab:** `http://runpod-tf:8888/?token=<JUPYTER_PASSWORD>`, then pick the
+  `TensorFlow 2.21.0` kernel (the default `Python 3` kernel has no TensorFlow). The token
+  is on the pod's *Connect* page; the Runpod API returns it redacted.
+- **PyCharm needs Pro.** A remote Jupyter server (*Settings → Languages & Frameworks →
+  Jupyter → Jupyter Servers → +*, URL with the token) and a remote interpreter (*On SSH*,
+  `/opt/tf/bin/python`) are both Pro features. The free tier of the unified PyCharm
+  (checked on 2026.2.3) excludes the `intellij.jupyter.py.pro` module, so the option to
+  add a server never shows up and notebooks run only on a local kernel. Without Pro, use
+  JupyterLab in the browser, or VS Code's Jupyter extension (*Select Kernel → Existing
+  Jupyter Server*), which takes the same URL for free. The SSH interpreter also needs a
+  key in Runpod's *Settings → SSH Public Keys* before the pod is created.
 - **ComfyUI:** `http://runpod-comfy:8188`, FileBrowser at `:8080`.
 
 The pod keeps its tailnet name across stop/start, unlike Runpod's public TCP ports,
@@ -164,8 +174,37 @@ To bump a version, edit `docker-bake.hcl`. For Tailscale, the checksum is at
   share a state directory and fight over the node identity.
 - **Deleting a node in the admin console** invalidates the stored state. Remove
   `/workspace/.tailscale/<hostname>` so the next boot registers again with the auth key.
-- **ComfyUI first boot** copies ComfyUI to `/workspace/runpod-slim` and takes a few
-  minutes; "Running" in the console does not mean the UI is up yet.
+- **"Running" is not ready.** The console says Running while the host is still pulling
+  the image. The first pull on a host takes minutes: the comfyui image is 5.4 GB, 4.9 GB
+  of it one layer from the Runpod base, which Docker prints as an endless stream of
+  `<layer> Downloading` and Runpod as `still fetching image`. Then ComfyUI's first boot
+  copies itself to `/workspace/runpod-slim` (30 s on the host-local volume, several
+  minutes on a network volume). Wait for the app's own line, not the pod status.
+- **A broken GPU host looks like an image bug.** On one Community Cloud host the GPU was
+  visible (`CUDA device count: 1`) but the driver failed to initialise
+  (`RuntimeError: CUDA unknown error`), and ComfyUI exited. The same image worked on the
+  next host. Terminate the pod and deploy again elsewhere (Secure Cloud was reliable)
+  rather than debugging the image.
 - **Models belong on the volume, not in the image.** Download them on the pod
   (ComfyUI-Manager, `huggingface-cli`). Uploading them over a DERP-relayed tailnet
   connection is slow.
+
+## Test results (2026-10-27)
+
+Images `sha-02aad72`, templates as above, ephemeral auth key. Times are from the pod
+logs, counted from the create call.
+
+| | comfyui, Community | comfyui, Secure | tf, Secure |
+| --- | --- | --- | --- |
+| GPU, data center | RTX A6000 (host CUDA 13.0) | RTX A6000, EU-SE-1 (13.2) | RTX A4000, EUR-IS-1 (13.2) |
+| Price | $0.33/h | $0.59/h | $0.25/h |
+| Image pull | ~5.5 min | cached, container up in 5 s | ~7.5 min |
+| Tailscale joined | 2 s after container start | 1 s after | 1 s after |
+| Path from the Mac | DERP (mad), 76 ms | direct, 38 ms | direct, 66 ms |
+| App | ComfyUI exited: `CUDA unknown error` (host fault) | ComfyUI on `cuda:0`, 44 GB VRAM, UI up ~70 s after create | JupyterLab up ~8 min after create, 403 without token |
+| Over the tailnet | Jupyter 302, FileBrowser 200 | ComfyUI 200, Jupyter 302, FileBrowser 200 | Jupyter 302 |
+
+Not covered: TensorFlow seeing the GPU from the `TensorFlow` kernel (no notebook was run),
+SSH (no key registered on the Runpod account), PyCharm (free tier, see
+[Connecting](#connecting)), and whether a pod can reach other tailnet hosts (needs a
+shell in the pod). Total cost of the three pods: about $0.22.
