@@ -57,9 +57,12 @@ logged to `/var/log/tailscaled.log` and never blocks or restarts the pod. Withou
    ```
 
 2. **Auth key.** In the Tailscale admin console: *Settings → Keys → Generate auth key*,
-   **reusable**, **pre-approved**, tag `tag:runpod`. Leave it non-ephemeral when using the
-   default persistent state. Auth keys expire after at most 90 days; nodes already joined
-   keep working, because tagged nodes have key expiry disabled.
+   **reusable**, **ephemeral**, tag `tag:runpod` (and **pre-approved**, which the console
+   offers only when device approval is on). Ephemeral matches the templates'
+   `TS_STATE_DIR=mem`: the node disappears from the tailnet shortly after the pod goes
+   away. With persistent state instead, use a non-ephemeral key. Auth keys expire after at
+   most 90 days; nodes already joined keep working, because tagged nodes have key expiry
+   disabled.
 
 3. **Runpod secret.** Store the key as a Runpod secret named `ts_authkey`. It is
    referenced from the template as `{{ RUNPOD_SECRET_ts_authkey }}`, so it never
@@ -97,7 +100,13 @@ Common to both:
   known build and hosts never serve a stale cached `latest`. After a CI build worth
   shipping, point the template at the new tag (*Templates → Edit*, or the Runpod MCP
   `update-template`).
-- **Environment:** `TS_AUTHKEY={{ RUNPOD_SECRET_ts_authkey }}` and `TS_HOSTNAME`.
+- **Environment:** `TS_AUTHKEY={{ RUNPOD_SECRET_ts_authkey }}`, `TS_HOSTNAME` and
+  `TS_STATE_DIR=mem`. In-memory state, because these pods are mostly throwaway: state on
+  the template's host-local volume is deleted with the pod and leaves a stale offline node,
+  and the next pod then registers as `<name>-1`. With `mem` and an ephemeral key, every
+  boot joins as a fresh node under the same name (new 100.x IP) and the old one is removed
+  automatically. For a long-lived pod on a network volume, drop `TS_STATE_DIR` to keep
+  one identity across stop/start.
   `startJupyter` and `startSsh` are on, so Runpod injects a generated
   `JUPYTER_PASSWORD` (shown on the pod's *Connect* page) and the account's SSH keys as
   `PUBLIC_KEY`.
@@ -105,7 +114,8 @@ Common to both:
   would boot without SSH, JupyterLab or ComfyUI.
 - **Volume:** the template's volume disk is host-local. For data that must outlive the
   host, pick a network volume at deploy time; it mounts at `/workspace` in its place.
-  Only `/workspace` survives a stop/start, and the Tailscale state lives there too.
+  Only `/workspace` survives a stop/start (and the Tailscale state, when `TS_STATE_DIR`
+  is left at its default).
 - **Ports:** only `8888/http` (JupyterLab, token-protected) and `22/tcp` (SSH, key
   only), as a way in if Tailscale does not come up. ComfyUI (`8188`, no login) and
   FileBrowser (`8080`, default `admin` / `adminadmin12` unless `FILEBROWSER_PASSWORD` is
@@ -124,7 +134,8 @@ With `TS_HOSTNAME=runpod-tf` / `runpod-comfy`:
 - **ComfyUI:** `http://runpod-comfy:8188`, FileBrowser at `:8080`.
 
 The pod keeps its tailnet name across stop/start, unlike Runpod's public TCP ports,
-which change on every restart.
+which change on every restart. With `TS_STATE_DIR=mem` the name stays but the 100.x IP
+changes, so connect by name.
 
 ## Building locally
 
@@ -144,7 +155,8 @@ To bump a version, edit `docker-bake.hcl`. For Tailscale, the checksum is at
 3. SSH and the web UIs answer over the tailnet name.
 4. tf: `/opt/tf/bin/python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"`
    lists the GPU.
-5. After a stop/start, the pod comes back under the same name, not `<name>-1`.
+5. After a stop/start, the pod comes back under the same name, not `<name>-1`, and
+   (with an ephemeral key) its previous node is gone from the machine list.
 
 ## Gotchas
 
