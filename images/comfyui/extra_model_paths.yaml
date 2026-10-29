@@ -1,0 +1,25 @@
+# Model folders on the Runpod global volume, loaded with --extra-model-paths-config
+# by global-volume.sh only when the volume is mounted (it fills in __GLOBAL_DIR__).
+# is_default puts these folders first, so models downloaded from the UI land on the
+# volume instead of /workspace.
+runpods_global:
+  base_path: __GLOBAL_DIR__/models
+  is_default: true
+  checkpoints: checkpoints
+  clip: clip
+  clip_vision: clip_vision
+  configs: configs
+  controlnet: controlnet
+  diffusers: diffusers
+  diffusion_models: diffusion_models
+  embeddings: embeddings
+  gligen: gligen
+  hypernetworks: hypernetworks
+  loras: loras
+  photomaker: photomaker
+  style_models: style_models
+  text_encoders: text_encoders
+  unet: unet
+  upscale_models: upscale_models
+  vae: vae
+  vae_approx: vae_approx

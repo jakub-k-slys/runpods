@@ -6,7 +6,7 @@ reachable by a stable tailnet name and nothing has to be exposed publicly.
 | Image | Base | Adds |
 | --- | --- | --- |
 | `ghcr.io/jakub-k-slys/runpods/tf` | `runpod/base` (Ubuntu 24.04, SSH, JupyterLab) | TensorFlow in `/opt/tf` with a `TensorFlow` Jupyter kernel, Tailscale |
-| `ghcr.io/jakub-k-slys/runpods/comfyui` | `runpod/comfyui` (CUDA 12.8) | Tailscale |
+| `ghcr.io/jakub-k-slys/runpods/comfyui` | `runpod/comfyui` (CUDA 12.8) | Tailscale, models/inputs/outputs on a global volume when one is mounted ([below](#comfyui-with-a-global-volume)) |
 
 Versions are pinned in [`docker-bake.hcl`](docker-bake.hcl). CI builds both images on
 every push to `main` and publishes `:latest` and `:sha-<commit>`.
@@ -38,6 +38,7 @@ logged to `/var/log/tailscaled.log` and never blocks or restarts the pod. Withou
 | `TS_HOSTNAME` | `runpod-<pod id>` | Name on the tailnet. |
 | `TS_STATE_DIR` | `/workspace/.tailscale/<hostname>` | Node state, so the pod keeps its identity and name across stop/start. `mem` keeps it in memory (use with an ephemeral key). |
 | `TS_EXTRA_ARGS` | unset | Extra flags for `tailscale up`. |
+| `COMFY_GLOBAL_DIR` | `/workspace-global` | comfyui only: where a global volume is mounted ([below](#comfyui-with-a-global-volume)). |
 
 ## One-time setup
 
@@ -142,6 +143,41 @@ With `TS_HOSTNAME=runpod-tf` / `runpod-comfy`:
   Jupyter Server*), which takes the same URL for free. The SSH interpreter also needs a
   key in Runpod's *Settings → SSH Public Keys* before the pod is created.
 - **ComfyUI:** `http://runpod-comfy:8188`, FileBrowser at `:8080`.
+
+## ComfyUI with a global volume
+
+A Runpod global volume is object storage presented as files: any pod in any data center
+can mount it, but it handles only whole-file writes and reads well. Installing ComfyUI
+onto it fails (tried 2026-10-29 with the volume at `/workspace`): the base start script
+copies ComfyUI with rsync, whose temporary files the volume refuses
+(`mkstemp ".<file>.XXXXXX" failed: Operation not permitted`, exit 23), and ComfyUI never
+starts. Runpod's own advice is the same: keep the install local, the models global.
+
+So the comfyui image keeps ComfyUI on `/workspace` and puts only models, inputs and
+outputs on the global volume. Mount it at **`/workspace-global`** when creating the pod:
+
+```json
+"mounts": {"global": [{"volumeId": "<global volume id>", "path": "/workspace-global"}]}
+```
+
+A global volume cannot be combined with the template's volume disk, so `/workspace` is
+then the container disk: ComfyUI is copied there on every start (~30 s) and anything
+else under `/workspace` is lost when the pod stops. Before `/start.sh`,
+[`images/comfyui/global-volume.sh`](images/comfyui/global-volume.sh):
+
+- creates `models/<type>/` (checkpoints, loras, vae, …), `input/` and `output/` on the volume;
+- writes a managed block into `/workspace/runpod-slim/comfyui_args.txt`, which the base
+  script appends to ComfyUI's arguments: `--extra-model-paths-config` (the volume's model
+  folders, marked `is_default` so UI downloads land there), `--input-directory` and
+  `--output-directory`. Lines outside the block are left alone; without the mount the
+  block is removed, so the same `/workspace` works either way;
+- links `/workspace/global` to the volume, since FileBrowser and JupyterLab are rooted at
+  `/workspace`.
+
+The log line `[global-volume] models, inputs and outputs on /workspace-global` confirms
+it ran. `COMFY_GLOBAL_DIR` changes the mount path. Custom nodes stay on `/workspace`
+(git repositories and venvs are exactly what object storage handles badly), so with
+container-disk `/workspace` they are reinstalled per pod.
 
 The pod keeps its tailnet name across stop/start, unlike Runpod's public TCP ports,
 which change on every restart. With `TS_STATE_DIR=mem` the name stays but the 100.x IP
