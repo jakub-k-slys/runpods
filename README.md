@@ -83,7 +83,7 @@ Two private templates exist in the Runpod account:
 | | `runpods-tf` | `runpods-comfyui` |
 | --- | --- | --- |
 | Template id | `na5e98qdbb` | `bx72oa97x7` |
-| Image | `ghcr.io/jakub-k-slys/runpods/tf:sha-02aad72` | `ghcr.io/jakub-k-slys/runpods/comfyui:sha-02aad72` |
+| Image | `ghcr.io/jakub-k-slys/runpods/tf:sha-02aad72` | `ghcr.io/jakub-k-slys/runpods/comfyui:sha-ef4b0d4` |
 | `TS_HOSTNAME` | `runpod-tf` | `runpod-comfy` |
 | Container disk | 30 GB | 150 GB (the base's default) |
 | Volume at `/workspace` | 20 GB | 50 GB (as the official template) |
